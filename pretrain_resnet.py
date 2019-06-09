@@ -32,10 +32,66 @@ from keras.layers.merge import add
 from keras.layers.normalization import BatchNormalization
 from keras.regularizers import l2
 from keras import backend as K
-from keras.applications.imagenet_utils import _obtain_input_shape
+from keras_applications.imagenet_utils import _obtain_input_shape
+from keras.preprocessing.image import ImageDataGenerator
+from keras.callbacks import ModelCheckpoint, EarlyStopping,ReduceLROnPlateau,Callback,TensorBoard,CSVLogger
 
-from non_local import non_local_block
+from keras import regularizers
+from keras import optimizers
 
+from non_local_layer.non_local import non_local_block
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import keras.backend.tensorflow_backend as KTF
+
+import os
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+config = tf.ConfigProto()
+config.gpu_options.allow_growth=True
+session = tf.Session(config=config)
+KTF.set_session(session)
+
+# Define functional
+class LossHistory(Callback):
+    def on_train_begin(self, logs={}):
+        self.losses = {'batch':[], 'epoch':[]}
+        self.accuracy = {'batch':[], 'epoch':[]}
+        self.val_loss = {'batch':[], 'epoch':[]}
+        self.val_acc = {'batch':[], 'epoch':[]}
+
+    def on_batch_end(self, batch, logs={}):
+        self.losses['batch'].append(logs.get('loss'))
+        self.accuracy['batch'].append(logs.get('binary_accuracy'))
+        self.val_loss['batch'].append(logs.get('val_loss'))
+        self.val_acc['batch'].append(logs.get('val_binary_accuracy'))
+
+    def on_epoch_end(self, batch, logs={}):
+        self.losses['epoch'].append(logs.get('loss'))
+        self.accuracy['epoch'].append(logs.get('binary_accuracy'))
+        self.val_loss['epoch'].append(logs.get('val_loss'))
+        self.val_acc['epoch'].append(logs.get('val_binary_accuracy'))
+
+    def loss_plot(self, loss_type,iterative):
+        iters = range(len(self.losses[loss_type]))
+        plt.figure()
+        # acc
+        plt.plot(iters, self.accuracy[loss_type], 'r', label='train acc')
+        # loss
+        plt.plot(iters, self.losses[loss_type], 'g', label='train loss')
+        if loss_type == 'epoch':
+            # val_acc
+            plt.plot(iters, self.val_acc[loss_type], 'b', label='val acc')
+            # val_loss
+            plt.plot(iters, self.val_loss[loss_type], 'k', label='val loss')
+        plt.grid(True)
+        plt.xlabel(loss_type)
+        plt.ylabel('acc-loss')
+        plt.legend(loc="upper right")
+        if loss_type == 'epoch':
+            plt.savefig(iterative+'_epoch_loss.png')
+        if loss_type == 'batch':
+            plt.savefig(iterative+'_batch_loss.png')
 
 def _bn_relu(x, bn_name=None, relu_name=None):
     """Helper to build a BN -> relu block
@@ -133,6 +189,7 @@ def _shortcut(input_feature, residual, conv_name_base=None, bn_name_base=None):
 def _residual_block(block_function, filters, blocks, stage,
                     transition_strides=None, transition_dilation_rates=None,
                     dilation_rates=(1, 1), is_first_layer=False, dropout=None,
+                    add_non_local_block=False,
                     residual_unit=_bn_relu_conv):
     """Builds a residual block with repeating bottleneck blocks.
        stage: integer, current stage label, used for generating layer names
@@ -155,7 +212,8 @@ def _residual_block(block_function, filters, blocks, stage,
                                residual_unit=residual_unit)(x)
 
             # Non Local Blook
-            if filters >= 256:
+            #if filters >= 256:
+            if add_non_local_block:
                 print("Filters : ", filters, "Adding Non Local Blocks")
                 x = non_local_block(x, mode='embedded', compression=2)
 
@@ -280,7 +338,7 @@ def _string_to_function(identifier):
     return identifier
 
 
-def NonLocalResNet(input_shape=None, classes=10, block='bottleneck', residual_unit='v2', repetitions=None,
+def NonLocalResNet(input_shape=None, classes=10, block='bottleneck', residual_unit='v2', addnonlocal = False,repetitions=None,
                    initial_filters=64, activation='softmax', include_top=True, input_tensor=None, dropout=None,
                    transition_dilation_rate=(1, 1), initial_strides=(2, 2), initial_kernel_size=(7, 7),
                    initial_pooling='max', final_pooling=None, top='classification'):
@@ -296,6 +354,7 @@ def NonLocalResNet(input_shape=None, classes=10, block='bottleneck', residual_un
         classes: The number of outputs at final softmax layer
         block: The block function to use. This is either `'basic'` or `'bottleneck'`.
             The original paper used `basic` for layers < 50.
+        addnonlocal: The Non-Local Block is added into Model. Default is False.
         repetitions: Number of repetitions of various block units.
             At each block unit, the number of filters are doubled and the input size is halved.
             Default of None implies the ResNet50v2 values of [3, 4, 6, 3].
@@ -396,6 +455,7 @@ def NonLocalResNet(input_shape=None, classes=10, block='bottleneck', residual_un
                                 dropout=dropout,
                                 transition_dilation_rates=transition_dilation_rates,
                                 transition_strides=transition_strides,
+                                add_non_local_block = False,
                                 residual_unit=residual_unit)(block)
         filters *= 2
 
@@ -425,37 +485,92 @@ def NonLocalResNet(input_shape=None, classes=10, block='bottleneck', residual_un
     model = Model(inputs=img_input, outputs=x)
     return model
 
+def ResNet18(input_shape, classes):
+    """ResNet with 18 layers and v2 residual units
+    """
+    return NonLocalResNet(input_shape, classes, basic_block, repetitions=[2, 2, 2, 2])
 
 def NonLocalResNet18(input_shape, classes):
     """ResNet with 18 layers and v2 residual units
     """
-    return NonLocalResNet(input_shape, classes, basic_block, repetitions=[2, 2, 2, 2])
+    return NonLocalResNet(input_shape, classes, basic_block, addnonlocal = True, repetitions=[2, 2, 2, 2])
 
 
 def NonLocalResNet34(input_shape, classes):
     """ResNet with 34 layers and v2 residual units
     """
-    return NonLocalResNet(input_shape, classes, basic_block, repetitions=[3, 4, 6, 3])
+    return NonLocalResNet(input_shape, classes, basic_block, addnonlocal = True, repetitions=[3, 4, 6, 3])
 
 
 def NonLocalResNet50(input_shape, classes):
     """ResNet with 50 layers and v2 residual units
     """
-    return NonLocalResNet(input_shape, classes, bottleneck, repetitions=[3, 4, 6, 3])
+    return NonLocalResNet(input_shape, classes, bottleneck, addnonlocal = True, repetitions=[3, 4, 6, 3])
 
 
 def NonLocalResNet101(input_shape, classes):
     """ResNet with 101 layers and v2 residual units
     """
-    return NonLocalResNet(input_shape, classes, bottleneck, repetitions=[3, 4, 23, 3])
+    return NonLocalResNet(input_shape, classes, bottleneck, addnonlocal = True, repetitions=[3, 4, 23, 3])
 
 
 def NonLocalResNet152(input_shape, classes):
     """ResNet with 152 layers and v2 residual units
     """
-    return NonLocalResNet(input_shape, classes, bottleneck, repetitions=[3, 8, 36, 3])
+    return NonLocalResNet(input_shape, classes, bottleneck, addnonlocal = True, repetitions=[3, 8, 36, 3])
 
 
 if __name__ == '__main__':
-    model = NonLocalResNet18((128, 160, 3), classes=10)
+    lr = 1e-04
+    bs = 128
+    n_sample = 1232167
+    ep = 50
+    train_datagen = ImageDataGenerator(
+        rescale=1./255,
+        shear_range=0.2,
+        zoom_range=0.2,
+        horizontal_flip=True)
+
+    test_datagen = ImageDataGenerator(rescale=1./255)
+
+    train_generator = train_datagen.flow_from_directory(
+            'K:/Windows/ImageNet/imagenet12/train',
+            target_size=(64, 64),
+            batch_size=bs,
+            class_mode='categorical')
+
+    validation_generator = test_datagen.flow_from_directory(
+            'K:/Windows/ImageNet/imagenet12/val',
+            target_size=(64, 64),
+            batch_size=bs,
+            class_mode='categorical')
+    model = ResNet18((64, 64, 3), classes=1000)
     model.summary()
+    SGD = optimizers.SGD(lr=lr, momentum=0.9, decay=3e-04, nesterov=True)
+    model.compile(optimizer=SGD, loss=['categorical_crossentropy'],metrics=['categorical_accuracy'])
+    
+    history = LossHistory()
+    log_filepath = '/tmp/keras_log/log'
+    filepath = 'Results/best_model.h5'
+    checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=True, mode='min')
+    tb_cb = TensorBoard(
+        log_dir=log_filepath,
+        histogram_freq=0,
+        batch_size=bs,
+        write_graph=True,
+        write_grads=True,
+        write_images=True)
+    earlystop = EarlyStopping(
+        monitor='val_loss', patience=0, verbose=0, mode='auto')
+    csv_logger = CSVLogger('Results/training.log')
+    reduce_lr = ReduceLROnPlateau(
+        monitor='val_loss', factor=0.5, patience=2, min_lr=1e-09)
+    model.fit_generator(
+            train_generator,
+            steps_per_epoch=n_sample / bs,
+            epochs=ep,
+            verbose=1,
+            callbacks=[history, checkpoint, csv_logger],
+            validation_data=validation_generator,
+            validation_steps=800)
+    
